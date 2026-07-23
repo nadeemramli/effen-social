@@ -1,10 +1,17 @@
 import { copyFile, mkdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
+import { z } from "zod";
 import {
   ANALYSIS_SCHEMA_VERSION,
   analysisV1Schema,
+  audioPart,
+  chatStructured,
+  imagePart,
   mockAnalysis,
+  OpenRouterError,
+  resolveRoute,
   type JobPayload,
 } from "@effen/core";
 import {
@@ -75,24 +82,80 @@ async function recordRun(opts: {
   error?: string;
   mediaSeconds?: number | null;
   cached?: boolean;
+  model?: string;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  reportedCostUsd?: number | null;
 }) {
+  const mock = env.EFFEN_MODE === "mock";
   await db.from("ai_runs").insert({
     workspace_id: opts.workspaceId,
     operation: opts.operation,
-    provider: env.EFFEN_MODE === "mock" ? "mock" : "unconfigured",
-    model:
-      env.EFFEN_MODE === "mock" ? `mock:${opts.operation}` : "unconfigured",
+    provider: mock ? "mock" : "openrouter",
+    model: opts.model ?? (mock ? `mock:${opts.operation}` : "openrouter"),
     prompt_template: opts.promptTemplate,
     prompt_version: ANALYSIS_PROMPT_VERSION,
     output_schema_version: ANALYSIS_SCHEMA_VERSION,
+    input_tokens: opts.inputTokens ?? null,
+    output_tokens: opts.outputTokens ?? null,
     media_seconds: opts.mediaSeconds ?? null,
-    estimated_cost_usd: 0, // mock mode spends nothing; live adapters report real numbers
+    estimated_cost_usd: 0, // pre-run estimates live in the web tier; this row carries actuals
+    reported_cost_usd: opts.reportedCostUsd ?? (mock ? 0 : null),
     latency_ms: opts.latencyMs,
     status: opts.status ?? "succeeded",
     error: opts.error ?? null,
     safety_flags: opts.cached ? ["cache_hit"] : [],
     video_id: opts.videoId ?? null,
   });
+}
+
+/** OpenRouter key for live mode; failing loudly beats silently degrading. */
+function openRouterKey(): string {
+  if (!env.OPENROUTER_API_KEY) {
+    throw new Error(
+      "EFFEN_MODE=live requires OPENROUTER_API_KEY — all AI operations route through OpenRouter (see .env.example).",
+    );
+  }
+  return env.OPENROUTER_API_KEY;
+}
+
+function liveModel(op: "transcription" | "video_understanding"): string {
+  return resolveRoute(
+    op,
+    process.env as Record<string, string | undefined>,
+    false,
+  ).model;
+}
+
+/** Load an asset from local storage as base64, or null if missing. */
+async function assetBase64(storageKey: string): Promise<string | null> {
+  try {
+    return (await readFile(diskPath(storageKey))).toString("base64");
+  } catch {
+    return null;
+  }
+}
+
+const transcriptSchema = z.object({
+  segments: z.array(
+    z.object({
+      start: z.number().min(0),
+      end: z.number().min(0),
+      text: z.string(),
+    }),
+  ),
+});
+
+/** Retryable wrapper: OpenRouter errors keep their retryability; invalid_request/auth are permanent. */
+function mapOpenRouterError(err: unknown): never {
+  if (
+    err instanceof OpenRouterError &&
+    !err.retryable &&
+    err.kind !== "insufficient_credits"
+  ) {
+    throw new PermanentJobError(err.message);
+  }
+  throw err instanceof Error ? err : new Error(String(err));
 }
 
 /* -------------------------------------------------------------- handlers */
@@ -314,21 +377,92 @@ export async function handleTranscribe(payload: JobPayload): Promise<void> {
   if (["analyzing", "generating_ideas", "complete"].includes(video.status))
     return;
 
-  if (env.EFFEN_MODE !== "mock") {
-    throw new Error(
-      "Live transcription is not configured. Set EFFEN_MODE=mock, or provide OPENAI_API_KEY and implement-check the live adapter (docs/DECISIONS.md).",
-    );
-  }
   const started = Date.now();
-  await sleep(env.WORKER_STEP_DELAY_MS);
-  await recordRun({
-    workspaceId,
-    videoId,
-    operation: "transcription",
-    promptTemplate: "transcription.v1",
-    latencyMs: Date.now() - started,
-    mediaSeconds: Number(video.duration_seconds ?? 0),
-  });
+  if (env.EFFEN_MODE === "mock") {
+    await sleep(env.WORKER_STEP_DELAY_MS);
+    await recordRun({
+      workspaceId,
+      videoId,
+      operation: "transcription",
+      promptTemplate: "transcription.v1",
+      latencyMs: Date.now() - started,
+      mediaSeconds: Number(video.duration_seconds ?? 0),
+    });
+  } else {
+    // Live: audio-capable chat model via OpenRouter (input_audio, base64 wav).
+    const { data: audioAsset } = await db
+      .from("media_assets")
+      .select("storage_key")
+      .eq("video_id", videoId)
+      .eq("kind", "audio")
+      .maybeSingle();
+    const audioB64 = audioAsset
+      ? await assetBase64(audioAsset.storage_key)
+      : null;
+
+    if (!audioB64) {
+      // URL-only video with no acquired media: analysis proceeds without a
+      // transcript and must flag it, never invent one.
+      await recordRun({
+        workspaceId,
+        videoId,
+        operation: "transcription",
+        promptTemplate: "transcription.v1",
+        latencyMs: Date.now() - started,
+        status: "succeeded",
+        model: "skipped:no-audio",
+      });
+    } else {
+      try {
+        const result = await chatStructured({
+          apiKey: openRouterKey(),
+          model: liveModel("transcription"),
+          schema: transcriptSchema,
+          schemaName: "transcript_v1",
+          temperature: 0,
+          timeoutMs: 180_000,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Transcribe the audio verbatim into timestamped segments (seconds from start). If speech is unintelligible, produce fewer segments — never invent words.",
+            },
+            { role: "user", content: [audioPart(audioB64)] },
+          ],
+        });
+        await db.from("raw_provider_payloads").insert({
+          workspace_id: workspaceId,
+          provider: "openrouter",
+          ref_type: "transcript",
+          ref_id: videoId,
+          payload: result.data,
+        });
+        await recordRun({
+          workspaceId,
+          videoId,
+          operation: "transcription",
+          promptTemplate: "transcription.v1",
+          latencyMs: Date.now() - started,
+          mediaSeconds: Number(video.duration_seconds ?? 0),
+          model: result.model,
+          inputTokens: result.usage.promptTokens,
+          outputTokens: result.usage.completionTokens,
+          reportedCostUsd: result.usage.costUsd,
+        });
+      } catch (err) {
+        await recordRun({
+          workspaceId,
+          videoId,
+          operation: "transcription",
+          promptTemplate: "transcription.v1",
+          latencyMs: Date.now() - started,
+          status: "failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        mapOpenRouterError(err);
+      }
+    }
+  }
   await transition(
     videoId,
     workspaceId,
@@ -347,12 +481,6 @@ export async function handleAnalyze(payload: JobPayload): Promise<void> {
   if (!videoId) throw new PermanentJobError("analyze requires videoId");
   const video = await getVideo(videoId, workspaceId);
   if (["generating_ideas", "complete"].includes(video.status)) return;
-
-  if (env.EFFEN_MODE !== "mock") {
-    throw new Error(
-      "Live video understanding is not configured. Set EFFEN_MODE=mock, or provide GEMINI_API_KEY and enable the live adapter (docs/DECISIONS.md).",
-    );
-  }
 
   const started = Date.now();
   const checksum: string | null = video.media_checksum;
@@ -388,22 +516,113 @@ export async function handleAnalyze(payload: JobPayload): Promise<void> {
     .limit(1)
     .maybeSingle();
 
+  let liveUsage: {
+    model: string;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    costUsd: number | null;
+  } | null = null;
+
   if (!content) {
-    await sleep(env.WORKER_STEP_DELAY_MS * 2);
     const { data: snapshot } = await db
       .from("video_metrics_snapshots")
-      .select("views, likes, comments")
+      .select("views, likes, comments, shares, saves")
       .eq("video_id", videoId)
       .order("captured_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    content = mockAnalysis({
-      // Regenerations vary the seed so a new version is genuinely different.
-      seed: `${checksum ?? videoId}${force ? `:v${(latestForSeed?.version ?? 0) + 1}` : ""}`,
-      durationSeconds: Number(video.duration_seconds ?? 45),
-      title: video.title,
-      metrics: snapshot ?? null,
-    });
+
+    if (env.EFFEN_MODE === "mock") {
+      await sleep(env.WORKER_STEP_DELAY_MS * 2);
+      content = mockAnalysis({
+        // Regenerations vary the seed so a new version is genuinely different.
+        seed: `${checksum ?? videoId}${force ? `:v${(latestForSeed?.version ?? 0) + 1}` : ""}`,
+        durationSeconds: Number(video.duration_seconds ?? 45),
+        title: video.title,
+        metrics: snapshot ?? null,
+      });
+    } else {
+      // Live: multimodal analysis via OpenRouter — transcript (if any), scene
+      // frames, and stored metrics. Nothing outside this context may be claimed.
+      const { data: transcriptRow } = await db
+        .from("raw_provider_payloads")
+        .select("payload")
+        .eq("ref_type", "transcript")
+        .eq("ref_id", videoId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const { data: frameAssets } = await db
+        .from("media_assets")
+        .select("storage_key, frame_time_seconds")
+        .eq("video_id", videoId)
+        .eq("kind", "frame")
+        .order("frame_time_seconds")
+        .limit(6);
+
+      const frameParts = [];
+      for (const f of frameAssets ?? []) {
+        const b64 = await assetBase64(f.storage_key);
+        if (b64) frameParts.push(imagePart(b64, "image/jpeg"));
+      }
+
+      const contextBlob = JSON.stringify({
+        title: video.title,
+        caption: video.caption,
+        platform: video.platform,
+        durationSeconds: video.duration_seconds,
+        publishedAt: video.published_at,
+        hashtags: video.hashtags,
+        metrics: snapshot ?? null,
+        transcript: transcriptRow?.payload ?? null,
+        frameTimestamps: (frameAssets ?? []).map((f) => f.frame_time_seconds),
+      });
+
+      try {
+        const result = await chatStructured({
+          apiKey: openRouterKey(),
+          model: liveModel("video_understanding"),
+          schema: analysisV1Schema,
+          schemaName: "analysis_v1",
+          temperature: 0.3,
+          timeoutMs: 240_000,
+          messages: [
+            {
+              role: "system",
+              content: `You are a short-form video analyst. Ground every statement in the provided transcript, frames, and metrics — set fields to null and list uncertainties when evidence is missing. Never invent metrics, quotes, or timestamps. schemaVersion must be 1. Idea candidates must be original adaptations for the viewer's own content, never imitations; flag copying risk honestly. If no transcript is provided, set transcriptSource to "unavailable" and return an empty transcript array.`,
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `Analyze this video.\nContext JSON:\n${contextBlob}`,
+                },
+                ...frameParts,
+              ],
+            },
+          ],
+        });
+        content = result.data;
+        liveUsage = {
+          model: result.model,
+          inputTokens: result.usage.promptTokens,
+          outputTokens: result.usage.completionTokens,
+          costUsd: result.usage.costUsd,
+        };
+      } catch (err) {
+        await recordRun({
+          workspaceId,
+          videoId,
+          operation: "video_understanding",
+          promptTemplate: "analysis.v1",
+          latencyMs: Date.now() - started,
+          status: "failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        mapOpenRouterError(err);
+      }
+    }
   }
 
   const parsed = analysisV1Schema.safeParse(content);
@@ -435,8 +654,14 @@ export async function handleAnalyze(payload: JobPayload): Promise<void> {
     persona_version: persona?.current_version ?? null,
     media_checksum: checksum,
     content: parsed.data,
-    model: cached ? "cache" : "mock:gemini-2.5-flash",
-    provider: cached ? "cache" : "mock",
+    model: cached
+      ? "cache"
+      : (liveUsage?.model ?? `mock:${liveModel("video_understanding")}`),
+    provider: cached
+      ? "cache"
+      : env.EFFEN_MODE === "mock"
+        ? "mock"
+        : "openrouter",
   });
   if (insertError)
     throw new Error(`analysis insert failed: ${insertError.message}`);
@@ -449,6 +674,14 @@ export async function handleAnalyze(payload: JobPayload): Promise<void> {
     latencyMs: Date.now() - started,
     mediaSeconds: Number(video.duration_seconds ?? 0),
     cached,
+    ...(liveUsage
+      ? {
+          model: liveUsage.model,
+          inputTokens: liveUsage.inputTokens,
+          outputTokens: liveUsage.outputTokens,
+          reportedCostUsd: liveUsage.costUsd,
+        }
+      : {}),
   });
 
   await transition(

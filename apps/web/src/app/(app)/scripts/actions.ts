@@ -3,14 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import {
-  mockHooks,
-  mockRegenerateSection,
-  mockResearch,
-  mockReviseScript,
-  mockScript,
+  OpenRouterError,
   researchV1Schema,
   scriptV1Schema,
   SCRIPT_STATUSES,
+  type ResearchV1,
   type ScriptStatus,
   type ScriptV1,
 } from "@effen/core";
@@ -18,6 +15,37 @@ import { requireWorkspace, writeAudit } from "@/lib/workspace";
 import { supabaseServer } from "@/lib/supabase/server";
 import { checkBudget } from "@/lib/budget";
 import { recordAiRun, roughTokens } from "@/lib/ai/service";
+import {
+  generateHooks,
+  generateResearch,
+  generateScriptDraft,
+  regenerateSectionAI,
+  reviseScriptAI,
+  type GenUsage,
+} from "@/lib/ai/generate";
+
+/** Human-readable failure for OpenRouter errors; generic otherwise. */
+function aiErrorMessage(err: unknown): string {
+  if (err instanceof OpenRouterError) {
+    if (err.kind === "insufficient_credits")
+      return "OpenRouter account is out of credits — top up at openrouter.ai and try again.";
+    if (err.kind === "auth")
+      return "OpenRouter rejected the API key. Check OPENROUTER_API_KEY.";
+    if (err.retryable)
+      return "The AI provider is unavailable right now. Your work is saved — try again shortly.";
+    return `AI request failed: ${err.message}`;
+  }
+  return err instanceof Error ? err.message : "AI generation failed.";
+}
+
+function usageFields(usage: GenUsage, fallbackIn: number, fallbackOut: number) {
+  return {
+    inputTokens: usage.inputTokens ?? fallbackIn,
+    outputTokens: usage.outputTokens ?? fallbackOut,
+    reportedCostUsd: usage.reportedCostUsd,
+    servedModel: usage.servedModel,
+  };
+}
 
 async function getScript(scriptId: string) {
   const ws = await requireWorkspace();
@@ -95,7 +123,30 @@ export async function runResearch(scriptId: string): Promise<ActionResult> {
   if (!decision.allowed) return { ok: false, blocked: decision.detail };
 
   const started = Date.now();
-  const research = mockResearch(scriptId, topic);
+  const topicMeta = script.topic as {
+    angle?: string;
+    audience?: string;
+  } | null;
+  let research: ResearchV1;
+  let usage: GenUsage;
+  try {
+    ({ data: research, usage } = await generateResearch(scriptId, topic, {
+      ...(topicMeta?.angle ? { angle: topicMeta.angle } : {}),
+      ...(topicMeta?.audience ? { audience: topicMeta.audience } : {}),
+    }));
+  } catch (err) {
+    await recordAiRun({
+      workspaceId: ws.workspaceId,
+      operation: "research",
+      promptTemplate: "research.v1",
+      outputSchemaVersion: 1,
+      scriptId,
+      latencyMs: Date.now() - started,
+      status: "failed",
+      error: aiErrorMessage(err),
+    });
+    return { ok: false, error: aiErrorMessage(err) };
+  }
   const { error } = await supabase
     .from("scripts")
     .update({ research, stage: "research" })
@@ -108,8 +159,7 @@ export async function runResearch(scriptId: string): Promise<ActionResult> {
     promptTemplate: "research.v1",
     outputSchemaVersion: 1,
     scriptId,
-    inputTokens: estTokens,
-    outputTokens: roughTokens(JSON.stringify(research)),
+    ...usageFields(usage, estTokens, roughTokens(JSON.stringify(research))),
     latencyMs: Date.now() - started,
     status: "succeeded",
   });
@@ -129,7 +179,28 @@ export async function runHooks(scriptId: string): Promise<ActionResult> {
   if (!decision.allowed) return { ok: false, blocked: decision.detail };
 
   const started = Date.now();
-  const hooks = mockHooks(scriptId, topic);
+  const researchParsed = script.research
+    ? researchV1Schema.safeParse(script.research)
+    : null;
+  let hooks: Awaited<ReturnType<typeof generateHooks>>["data"];
+  let usage: GenUsage;
+  try {
+    ({ data: hooks, usage } = await generateHooks(scriptId, topic, {
+      research: researchParsed?.success ? researchParsed.data : null,
+    }));
+  } catch (err) {
+    await recordAiRun({
+      workspaceId: ws.workspaceId,
+      operation: "hook_generation",
+      promptTemplate: "hooks.v1",
+      outputSchemaVersion: 1,
+      scriptId,
+      latencyMs: Date.now() - started,
+      status: "failed",
+      error: aiErrorMessage(err),
+    });
+    return { ok: false, error: aiErrorMessage(err) };
+  }
   const existing = (script.hook as { selected?: unknown } | null) ?? {};
   const { error } = await supabase
     .from("scripts")
@@ -143,8 +214,11 @@ export async function runHooks(scriptId: string): Promise<ActionResult> {
     promptTemplate: "hooks.v1",
     outputSchemaVersion: 1,
     scriptId,
-    inputTokens: roughTokens(topic) + 800,
-    outputTokens: roughTokens(JSON.stringify(hooks)),
+    ...usageFields(
+      usage,
+      roughTokens(topic) + 800,
+      roughTokens(JSON.stringify(hooks)),
+    ),
     latencyMs: Date.now() - started,
     status: "succeeded",
   });
@@ -186,11 +260,33 @@ export async function generateScript(scriptId: string): Promise<ActionResult> {
 
   const started = Date.now();
   const version = (script.current_version as number) + 1;
-  const content = mockScript({
-    seed: `${scriptId}:v${version}`,
-    topic,
-    hookText: selected,
-  });
+  const researchParsed = script.research
+    ? researchV1Schema.safeParse(script.research)
+    : null;
+  let content: ScriptV1;
+  let usage: GenUsage;
+  try {
+    ({ data: content, usage } = await generateScriptDraft(
+      `${scriptId}:v${version}`,
+      {
+        topic,
+        hookText: selected,
+        research: researchParsed?.success ? researchParsed.data : null,
+      },
+    ));
+  } catch (err) {
+    await recordAiRun({
+      workspaceId: ws.workspaceId,
+      operation: "script_writing",
+      promptTemplate: "script.v1",
+      outputSchemaVersion: 1,
+      scriptId,
+      latencyMs: Date.now() - started,
+      status: "failed",
+      error: aiErrorMessage(err),
+    });
+    return { ok: false, error: aiErrorMessage(err) };
+  }
 
   const { error: vErr } = await supabase.from("script_versions").insert({
     script_id: scriptId,
@@ -217,11 +313,13 @@ export async function generateScript(scriptId: string): Promise<ActionResult> {
     promptTemplate: "script.v1",
     outputSchemaVersion: 1,
     scriptId,
-    inputTokens:
+    ...usageFields(
+      usage,
       roughTokens(JSON.stringify(script.research ?? "")) +
-      roughTokens(topic) +
-      1200,
-    outputTokens: roughTokens(JSON.stringify(content)),
+        roughTokens(topic) +
+        1200,
+      roughTokens(JSON.stringify(content)),
+    ),
     latencyMs: Date.now() - started,
     status: "succeeded",
   });
@@ -302,11 +400,27 @@ export async function reviseScript(
   const current = scriptV1Schema.parse(latest.content);
 
   const started = Date.now();
-  const revised = mockReviseScript(
-    `${scriptId}:${latest.version}`,
-    current,
-    instruction,
-  );
+  let revised: ScriptV1;
+  let usage: GenUsage;
+  try {
+    ({ data: revised, usage } = await reviseScriptAI(
+      `${scriptId}:${latest.version}`,
+      current,
+      instruction,
+    ));
+  } catch (err) {
+    await recordAiRun({
+      workspaceId: ws.workspaceId,
+      operation: "script_revision",
+      promptTemplate: "script-revision.v1",
+      outputSchemaVersion: 1,
+      scriptId,
+      latencyMs: Date.now() - started,
+      status: "failed",
+      error: aiErrorMessage(err),
+    });
+    return { ok: false, error: aiErrorMessage(err) };
+  }
   const version = (latest.version as number) + 1;
   const { error } = await supabase.from("script_versions").insert({
     script_id: scriptId,
@@ -328,9 +442,11 @@ export async function reviseScript(
     promptTemplate: "script-revision.v1",
     outputSchemaVersion: 1,
     scriptId,
-    inputTokens:
+    ...usageFields(
+      usage,
       roughTokens(JSON.stringify(current)) + roughTokens(instruction),
-    outputTokens: roughTokens(JSON.stringify(revised)),
+      roughTokens(JSON.stringify(revised)),
+    ),
     latencyMs: Date.now() - started,
     status: "succeeded",
   });
@@ -363,11 +479,27 @@ export async function regenerateSection(
     return { ok: false, error: "Section not found." };
 
   const started = Date.now();
-  const next = mockRegenerateSection(
-    `${scriptId}:${latest.version}`,
-    current,
-    sectionId,
-  );
+  let next: ScriptV1;
+  let usage: GenUsage;
+  try {
+    ({ data: next, usage } = await regenerateSectionAI(
+      `${scriptId}:${latest.version}`,
+      current,
+      sectionId,
+    ));
+  } catch (err) {
+    await recordAiRun({
+      workspaceId: ws.workspaceId,
+      operation: "script_writing",
+      promptTemplate: "script.v1",
+      outputSchemaVersion: 1,
+      scriptId,
+      latencyMs: Date.now() - started,
+      status: "failed",
+      error: aiErrorMessage(err),
+    });
+    return { ok: false, error: aiErrorMessage(err) };
+  }
   const version = (latest.version as number) + 1;
   const { error } = await supabase.from("script_versions").insert({
     script_id: scriptId,
@@ -389,10 +521,13 @@ export async function regenerateSection(
     promptTemplate: "script.v1",
     outputSchemaVersion: 1,
     scriptId,
-    inputTokens: roughTokens(JSON.stringify(current)),
-    outputTokens: roughTokens(
-      JSON.stringify(
-        next.sections.find((s) => s.id === sectionId)?.content ?? "",
+    ...usageFields(
+      usage,
+      roughTokens(JSON.stringify(current)),
+      roughTokens(
+        JSON.stringify(
+          next.sections.find((s) => s.id === sectionId)?.content ?? "",
+        ),
       ),
     ),
     latencyMs: Date.now() - started,

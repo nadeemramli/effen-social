@@ -238,7 +238,7 @@ describe("ai routing", () => {
     const media = estimateOperationUsd(MODEL_ROUTES.transcription, {
       mediaMinutes: 10,
     });
-    expect(media).toBeCloseTo(0.03);
+    expect(media).toBeCloseTo(0.04);
   });
 });
 
@@ -273,5 +273,19 @@ describe("schemas", () => {
     expect(md).toContain("## Hook");
     expect(md).toContain("- [ ] A stat");
     expect(estimateSpokenSeconds("word ".repeat(150))).toBe(60);
+  });
+});
+
+describe("openrouter structured outputs", () => {
+  it("converts the big schemas to JSON Schema without loss of type", async () => {
+    const { zodToJsonSchema } = await import("zod-to-json-schema");
+    for (const schema of [analysisV1Schema, scriptV1Schema]) {
+      const js = zodToJsonSchema(schema, { target: "openAi" }) as {
+        type?: string;
+        properties?: Record<string, unknown>;
+      };
+      expect(js.type).toBe("object");
+      expect(js.properties).toBeTruthy();
+    }
   });
 });

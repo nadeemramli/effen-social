@@ -14,6 +14,7 @@ const schema = z.object({
     .string()
     .min(10, "The worker requires SUPABASE_SECRET_KEY (service role)"),
   EFFEN_MODE: z.enum(["mock", "live"]).default("mock"),
+  OPENROUTER_API_KEY: z.string().optional().default(""),
   EFFEN_STORAGE: z.enum(["local", "r2"]).default("local"),
   EFFEN_LOCAL_STORAGE_DIR: z.string().default("./data/storage"),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().default(2000),

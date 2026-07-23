@@ -21,8 +21,7 @@ const serverEnvSchema = z
     R2_BUCKET: z.string().optional().default("effen-media"),
     EFFEN_QUEUE: z.enum(["db", "qstash"]).default("db"),
     QSTASH_TOKEN: z.string().optional().default(""),
-    OPENAI_API_KEY: z.string().optional().default(""),
-    GEMINI_API_KEY: z.string().optional().default(""),
+    OPENROUTER_API_KEY: z.string().optional().default(""),
     YOUTUBE_API_KEY: z.string().optional().default(""),
     APIFY_TOKEN: z.string().optional().default(""),
     APIFY_WEBHOOK_SECRET: z.string().optional().default(""),
@@ -42,6 +41,13 @@ const serverEnvSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "EFFEN_QUEUE=qstash requires QSTASH_TOKEN",
+      });
+    }
+    if (env.EFFEN_MODE === "live" && !env.OPENROUTER_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "EFFEN_MODE=live requires OPENROUTER_API_KEY (all AI operations route through OpenRouter)",
       });
     }
   });

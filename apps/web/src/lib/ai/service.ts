@@ -28,6 +28,10 @@ interface LedgerEntry {
   inputTokens?: number;
   outputTokens?: number;
   mediaSeconds?: number;
+  /** OpenRouter's per-response usage.cost — actual billed amount in USD credits. */
+  reportedCostUsd?: number | null;
+  /** Actual model that served the request (may differ from the routed slug). */
+  servedModel?: string | null;
   latencyMs: number;
   status: "succeeded" | "failed";
   error?: string | null;
@@ -35,8 +39,9 @@ interface LedgerEntry {
 }
 
 /**
- * Record every AI operation in the usage ledger, mock or live. Estimated cost is
- * computed from the routing table; live adapters can add reported cost later.
+ * Record every AI operation in the usage ledger, mock or live. Estimated cost
+ * comes from the routing price table; reported cost comes from OpenRouter's
+ * usage accounting when available and takes precedence in spend tracking.
  */
 export async function recordAiRun(entry: LedgerEntry): Promise<number> {
   const route = resolveRoute(
@@ -56,7 +61,7 @@ export async function recordAiRun(entry: LedgerEntry): Promise<number> {
     workspace_id: entry.workspaceId,
     operation: entry.operation,
     provider: route.provider,
-    model: route.model,
+    model: entry.servedModel ?? route.model,
     prompt_template: entry.promptTemplate,
     prompt_version:
       PROMPT_VERSIONS[entry.promptTemplate.split(".")[0] ?? ""] ??
@@ -68,6 +73,7 @@ export async function recordAiRun(entry: LedgerEntry): Promise<number> {
     output_tokens: entry.outputTokens ?? null,
     media_seconds: entry.mediaSeconds ?? null,
     estimated_cost_usd: estimated,
+    reported_cost_usd: entry.reportedCostUsd ?? null,
     latency_ms: entry.latencyMs,
     status: entry.status,
     error: entry.error ?? null,

@@ -38,7 +38,7 @@ delegated to the PRD is defined below as an explicit assumption.
   directly to the local storage directory; R2 support in the worker is a known gap
   (listed in README risks) until live media acquisition lands.
 - **Pipeline semantics**: uploads sit at `metadata_ready` after upload; ALL media work
-  (validation, proxy, audio, frames, checksum) runs *after* the user selects the video
+  (validation, proxy, audio, frames, checksum) runs _after_ the user selects the video
   for analysis, keeping expensive processing strictly opt-in per the cost principles.
   Each step is a separate idempotent job; steps forward `params` (e.g. `force`) down
   the chain.
@@ -61,14 +61,29 @@ mode, so budget caps and the `budget_blocked` path stay exercisable end-to-end. 
   `provider_down` for failure-path testing.
 - All mock outputs validate against the same zod schemas the live adapters must satisfy.
 
-## 5. Live-AI gap (Milestone 3/4 work)
+## 5. AI provider architecture: OpenRouter (user decision, 2026-07-24)
 
-Live adapters implemented and validated: YouTube Data API v3 (metadata/discovery/
-metrics), Apify Instagram + TikTok (metadata/discovery/metrics/run-status/cost). The
-worker's live path for transcription (OpenAI) and video understanding (Gemini) is
-stubbed with explicit errors naming the required env vars — in live mode without those
-adapters the video fails **retryably** with a clear message rather than pretending.
-Model IDs in `routing.ts` must be re-verified against provider docs before live use.
+All AI operations route through **OpenRouter** with a single `OPENROUTER_API_KEY`
+instead of per-vendor keys (originally OpenAI + Gemini):
+
+- `packages/core/src/ai/openrouter.ts` — dependency-free client: chat completions,
+  strict `json_schema` structured outputs (zod → JSON Schema) with zod re-validation,
+  typed retryability-aware errors (auth / insufficient_credits / rate_limited / …).
+- Per-response `usage.cost` (USD credits) is stored as `reported_cost_usd` in the
+  ledger next to the pre-run estimate; spend tracking prefers reported cost.
+- **Transcription** uses an audio-capable chat model (`google/gemini-2.5-flash`,
+  base64 `input_audio` parts) because OpenRouter exposes no dedicated STT endpoint;
+  transcripts persist to `raw_provider_payloads` (ref_type `transcript`) and feed the
+  analysis step. Videos without acquired media skip transcription and the analysis
+  must set `transcriptSource: "unavailable"` — no invented transcripts.
+- **Analysis** sends transcript + up to 6 scene frames (base64 JPEG) + stored metrics;
+  the system prompt forbids ungrounded claims.
+- Wizard research/hooks/script/revision/section-regen have full live paths in
+  `apps/web/src/lib/ai/generate.ts` (mock generators remain the mock-mode path).
+- Live-mode routing slugs (`openai/gpt-5.6-luna`, `openai/gpt-5.6-terra`,
+  `google/gemini-2.5-flash`, `openai/gpt-4o-mini`) must be verified against
+  openrouter.ai/models before first live run; every slug is env-overridable.
+- Ingestion (YouTube Data API, Apify) is unrelated to OpenRouter and keeps its own keys.
 
 ## 6. Security posture
 

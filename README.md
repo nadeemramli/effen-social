@@ -47,17 +47,18 @@ migrations applied. `.env.local` points at it. To run against it:
 
 ## Going live (per integration, all optional)
 
-| Capability          | Env vars                               | Notes                                                     |
-| ------------------- | -------------------------------------- | --------------------------------------------------------- |
-| YouTube metadata    | `YOUTUBE_API_KEY` + `EFFEN_MODE=live`  | Official Data API v3; embed playback; no downloading      |
-| Instagram/TikTok    | `APIFY_TOKEN` (+ enable in Settings)   | Unofficial, off by default; upload/link fallback works    |
-| Transcription       | `OPENAI_API_KEY`                       | `gpt-4o-mini-transcribe` via routing table                |
-| Video understanding | `GEMINI_API_KEY`                       | Gemini Flash-class; live adapter wiring is next milestone |
-| Media storage       | `EFFEN_STORAGE=r2` + `R2_*`            | S3-compatible signed URLs; local disk otherwise           |
-| Job queue           | `EFFEN_QUEUE=qstash` + `QSTASH_*`      | Postgres-backed polling queue otherwise                   |
+| Capability       | Env vars                                 | Notes                                                                                                                 |
+| ---------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **All AI**       | `OPENROUTER_API_KEY` + `EFFEN_MODE=live` | One key for every model via OpenRouter; live wizard, analysis, and audio transcription; billed cost captured per call |
+| YouTube metadata | `YOUTUBE_API_KEY`                        | Official Data API v3; embed playback; no downloading                                                                  |
+| Instagram/TikTok | `APIFY_TOKEN` (+ enable in Settings)     | Unofficial, off by default; upload/link fallback works                                                                |
+| Media storage    | `EFFEN_STORAGE=r2` + `R2_*`              | S3-compatible signed URLs; local disk otherwise                                                                       |
+| Job queue        | `EFFEN_QUEUE=qstash` + `QSTASH_*`        | Postgres-backed polling queue otherwise                                                                               |
 
-Model IDs live in **one file**: `packages/core/src/ai/routing.ts`, each overridable via
-env (`EFFEN_MODEL_*`). Verify IDs against provider docs before enabling live mode.
+Model slugs live in **one file**: `packages/core/src/ai/routing.ts` (OpenRouter
+"vendor/model" format), each overridable via env (`EFFEN_MODEL_*`). Transcription uses
+an audio-capable chat model (Gemini Flash) since OpenRouter has no dedicated STT
+endpoint. Verify slugs on openrouter.ai/models before enabling live mode.
 
 ## Commands
 

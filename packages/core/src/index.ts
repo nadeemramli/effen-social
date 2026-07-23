@@ -7,5 +7,6 @@ export * from "./storage/types";
 export * from "./jobs/types";
 export * from "./ai/routing";
 export * from "./ai/mock";
+export * from "./ai/openrouter";
 export * from "./schemas/analysis";
 export * from "./schemas/script";
