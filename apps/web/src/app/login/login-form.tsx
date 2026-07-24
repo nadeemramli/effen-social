@@ -24,7 +24,14 @@ export function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => {
+    const e = params.get("error");
+    if (e === "confirmation-link")
+      return "That confirmation link couldn't be processed. If you've already confirmed, just sign in below.";
+    if (e === "no-workspace")
+      return "Your session couldn't load its workspace. Sign in again.";
+    return null;
+  });
   const [notice, setNotice] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
@@ -35,7 +42,14 @@ export function LoginForm() {
     const supabase = supabaseBrowser();
     try {
       if (mode === "signup") {
-        const { data, error } = await supabase.auth.signUp({ email, password });
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            // Confirmation emails come back to this app, whatever host it runs on.
+            emailRedirectTo: `${window.location.origin}/auth/callback?next=/videos`,
+          },
+        });
         if (error) throw error;
         if (data.session) {
           router.push(params.get("next") ?? "/videos");
