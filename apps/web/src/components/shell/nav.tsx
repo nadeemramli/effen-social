@@ -1,8 +1,24 @@
 "use client";
 
-import Link from "next/link";
+import Link, { useLinkStatus } from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+
+/** Must be a descendant of <Link> for useLinkStatus to report its status. */
+function NavLinkLabel({ label }: { label: string }) {
+  const { pending } = useLinkStatus();
+  return (
+    <span className="flex items-center justify-between gap-2">
+      <span>{label}</span>
+      {pending && (
+        <span
+          className="border-sidebar-foreground/40 border-t-sidebar-foreground size-3 shrink-0 animate-spin rounded-full border-[1.5px]"
+          aria-hidden
+        />
+      )}
+    </span>
+  );
+}
 
 const SECTIONS: Array<{
   label: string;
@@ -58,7 +74,7 @@ export function ShellNav() {
                         : "text-sidebar-foreground/75 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
                     )}
                   >
-                    {item.label}
+                    <NavLinkLabel label={item.label} />
                   </Link>
                 </li>
               );

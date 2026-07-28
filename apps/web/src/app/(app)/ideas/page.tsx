@@ -8,30 +8,25 @@ export default async function IdeasPage() {
   const ws = await requireWorkspace();
   const supabase = await supabaseServer();
 
+  // Source video comes back embedded, so this is a single round trip.
   const { data } = await supabase
     .from("ideas")
     .select(
-      "id, video_id, analysis_id, title, angle, status, storytelling_format, persona_relevance, originality_rationale, evidence, copying_risk, copying_risk_note, notes, created_at, updated_at",
+      "id, video_id, analysis_id, title, angle, status, storytelling_format, persona_relevance, originality_rationale, evidence, copying_risk, copying_risk_note, notes, created_at, updated_at, video:videos(title, platform)",
     )
     .eq("workspace_id", ws.workspaceId)
-    .order("created_at", { ascending: false });
-  const ideas = (data ?? []) as IdeaRow[];
-
-  // Map source videos so cards can link back to where the idea came from.
-  const videoIds = [
-    ...new Set(ideas.map((i) => i.video_id).filter((id): id is string => !!id)),
-  ];
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const rows = (data ?? []) as unknown as Array<
+    IdeaRow & { video: { title: string | null; platform: string } | null }
+  >;
+  const ideas: IdeaRow[] = rows;
   const videos: Record<string, SourceVideo> = {};
-  if (videoIds.length > 0) {
-    const { data: rows } = await supabase
-      .from("videos")
-      .select("id, title, platform")
-      .eq("workspace_id", ws.workspaceId)
-      .in("id", videoIds);
-    for (const v of rows ?? []) {
-      videos[v.id as string] = {
-        title: (v.title as string | null) ?? null,
-        platform: v.platform as string,
+  for (const r of rows) {
+    if (r.video_id && r.video) {
+      videos[r.video_id] = {
+        title: r.video.title,
+        platform: r.video.platform,
       };
     }
   }

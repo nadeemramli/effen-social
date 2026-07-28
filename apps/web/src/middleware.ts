@@ -4,6 +4,13 @@ import { createServerClient } from "@supabase/ssr";
 const PUBLIC_PATHS = ["/login", "/auth", "/api/local-storage", "/api/webhooks"];
 
 export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+
+  // Fully public paths (except /login, which redirects authed users) need no
+  // auth work at all — skip the Supabase client entirely.
+  if (isPublic && pathname !== "/login") return NextResponse.next();
+
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
@@ -25,21 +32,18 @@ export async function middleware(request: NextRequest) {
     },
   );
 
-  // Refresh the session if needed; never remove this between client creation and getUser.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // getClaims verifies the JWT locally (ES256 + cached JWKS) and still runs the
+  // refresh-token exchange when the access token has expired.
+  const { data } = await supabase.auth.getClaims();
+  const authed = Boolean(data?.claims);
 
-  const { pathname } = request.nextUrl;
-  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-
-  if (!user && !isPublic) {
+  if (!authed && !isPublic) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", pathname);
     return NextResponse.redirect(url);
   }
-  if (user && pathname === "/login") {
+  if (authed && pathname === "/login") {
     const url = request.nextUrl.clone();
     url.pathname = "/videos";
     url.search = "";
@@ -51,6 +55,6 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|mp4)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/local-storage|api/webhooks|.*\\.(?:svg|png|jpg|jpeg|gif|webp|mp4)$).*)",
   ],
 };

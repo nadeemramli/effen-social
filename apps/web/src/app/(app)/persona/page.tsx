@@ -29,22 +29,29 @@ export default async function PersonaPage() {
   let versions: VersionRow[] = [];
   let currentContent: PersonaContent | null = null;
   if (persona) {
-    const { data: versionRows } = await supabase
-      .from("persona_versions")
-      .select("id, version, content, created_at")
-      .eq("persona_id", persona.id)
-      .eq("workspace_id", ws.workspaceId)
-      .order("version", { ascending: false });
+    // The list only needs metadata; full content is fetched for the current
+    // version alone (old versions load on demand in the history dialog).
+    const [{ data: versionRows }, { data: currentRow }] = await Promise.all([
+      supabase
+        .from("persona_versions")
+        .select("id, version, created_at")
+        .eq("persona_id", persona.id)
+        .eq("workspace_id", ws.workspaceId)
+        .order("version", { ascending: false }),
+      supabase
+        .from("persona_versions")
+        .select("content")
+        .eq("persona_id", persona.id)
+        .eq("workspace_id", ws.workspaceId)
+        .eq("version", persona.current_version)
+        .maybeSingle(),
+    ]);
     versions = (versionRows ?? []).map((v) => ({
       id: v.id as string,
       version: v.version as number,
       createdAt: v.created_at as string,
-      content: parsePersonaContent(v.content),
     }));
-    currentContent =
-      versions.find((v) => v.version === persona.current_version)?.content ??
-      versions[0]?.content ??
-      null;
+    currentContent = currentRow ? parsePersonaContent(currentRow.content) : null;
   }
 
   return (

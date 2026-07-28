@@ -21,7 +21,8 @@ export default async function ScriptsPage() {
     .from("scripts")
     .select("id, title, status, stage, current_version, updated_at, idea_id")
     .eq("workspace_id", ws.workspaceId)
-    .order("updated_at", { ascending: false });
+    .order("updated_at", { ascending: false })
+    .limit(200);
 
   const rows = scripts ?? [];
 

@@ -1,6 +1,6 @@
 import { requireWorkspace } from "@/lib/workspace";
 import { supabaseServer } from "@/lib/supabase/server";
-import { getBudgetSnapshot } from "@/lib/budget";
+import { getBudgetSnapshot, getWorkspaceSettingsRow } from "@/lib/budget";
 import { isMockMode } from "@/lib/env";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -93,51 +93,38 @@ export default async function SettingsPage() {
   const supabase = await supabaseServer();
   const mock = isMockMode();
 
-  const now = new Date();
-  const monthStart = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-  ).toISOString();
-
-  const [snapshot, settingsRes, runsCountRes, runsRes, auditRes] =
-    await Promise.all([
-      getBudgetSnapshot(ws.workspaceId),
-      supabase
-        .from("workspace_settings")
-        .select("raw_media_retention_days, providers_enabled")
-        .eq("workspace_id", ws.workspaceId)
-        .maybeSingle(),
-      supabase
-        .from("ai_runs")
-        .select("id", { count: "exact", head: true })
-        .eq("workspace_id", ws.workspaceId)
-        .gte("created_at", monthStart),
-      supabase
-        .from("ai_runs")
-        .select(
-          "id, operation, provider, model, input_tokens, output_tokens, estimated_cost_usd, reported_cost_usd, latency_ms, status, error, created_at",
-        )
-        .eq("workspace_id", ws.workspaceId)
-        .order("created_at", { ascending: false })
-        .limit(50),
-      supabase
-        .from("audit_log")
-        .select("id, action, detail, created_at")
-        .eq("workspace_id", ws.workspaceId)
-        .order("created_at", { ascending: false })
-        .limit(20),
-    ]);
+  // getWorkspaceSettingsRow is request-cached, so the snapshot and this page
+  // share one settings query; run counts come from the spend aggregate.
+  const [snapshot, settingsRow, runsRes, auditRes] = await Promise.all([
+    getBudgetSnapshot(ws.workspaceId),
+    getWorkspaceSettingsRow(ws.workspaceId),
+    supabase
+      .from("ai_runs")
+      .select(
+        "id, operation, provider, model, input_tokens, output_tokens, estimated_cost_usd, reported_cost_usd, latency_ms, status, error, created_at",
+      )
+      .eq("workspace_id", ws.workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(50),
+    supabase
+      .from("audit_log")
+      .select("id, action, detail, created_at")
+      .eq("workspace_id", ws.workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(20),
+  ]);
 
   const providers: ProvidersState = {
     manual_upload: true,
     youtube_official: true,
     instagram_apify: false,
     tiktok_apify: false,
-    ...((settingsRes.data?.providers_enabled ?? {}) as Partial<ProvidersState>),
+    ...((settingsRow?.providers_enabled ?? {}) as Partial<ProvidersState>),
   };
-  const retentionDays = settingsRes.data?.raw_media_retention_days ?? 0;
+  const retentionDays = settingsRow?.raw_media_retention_days ?? 0;
   const runs = (runsRes.data ?? []) as AiRunRow[];
   const auditEvents = (auditRes.data ?? []) as AuditRow[];
-  const runsThisMonth = runsCountRes.count ?? 0;
+  const runsThisMonth = snapshot.runsThisMonth;
 
   const dailyPct =
     snapshot.settings.dailyUsd > 0

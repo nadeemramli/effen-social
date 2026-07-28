@@ -104,16 +104,17 @@ export async function loadLibrary(
   ] = await Promise.all([
     supabase
       .from("videos")
-      .select("*")
+      .select(
+        "id, workspace_id, source_id, platform, origin, external_id, canonical_url, title, caption, published_at, duration_seconds, thumbnail_url, hashtags, language, status, status_detail, last_error, media_checksum, playback_embed_url, upload_file_name, created_at, updated_at",
+      )
       .eq("workspace_id", workspaceId)
       .order("created_at", { ascending: false })
       .limit(500),
+    // One pre-reduced row per video instead of every historical snapshot.
     supabase
-      .from("video_metrics_snapshots")
+      .from("latest_video_metrics")
       .select("video_id, views, likes, comments, shares, saves, captured_at")
-      .eq("workspace_id", workspaceId)
-      .order("captured_at", { ascending: false })
-      .limit(2000),
+      .eq("workspace_id", workspaceId),
     supabase
       .from("sources")
       .select("id, handle, tags")
@@ -126,16 +127,14 @@ export async function loadLibrary(
 
   const latestByVideo = new Map<string, MetricsRow>();
   for (const s of snapshots ?? []) {
-    if (!latestByVideo.has(s.video_id)) {
-      latestByVideo.set(s.video_id, {
-        views: s.views,
-        likes: s.likes,
-        comments: s.comments,
-        shares: s.shares,
-        saves: s.saves,
-        captured_at: s.captured_at,
-      });
-    }
+    latestByVideo.set(s.video_id, {
+      views: s.views,
+      likes: s.likes,
+      comments: s.comments,
+      shares: s.shares,
+      saves: s.saves,
+      captured_at: s.captured_at,
+    });
   }
   const sourceById = new Map((sources ?? []).map((s) => [s.id, s]));
   const analyzed = new Set((analyses ?? []).map((a) => a.video_id));

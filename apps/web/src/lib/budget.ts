@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import {
   DEFAULT_BUDGET,
   evaluateBudget,
@@ -7,10 +8,35 @@ import {
 } from "@effen/core";
 import { supabaseServer } from "@/lib/supabase/server";
 
+export interface WorkspaceSettingsRow {
+  daily_budget_usd: number | string;
+  monthly_budget_usd: number | string;
+  per_run_item_cap: number;
+  per_run_charge_cap_usd: number | string;
+  raw_media_retention_days: number;
+  providers_enabled: Record<string, boolean> | null;
+}
+
+/** One settings row per request — the budget snapshot and the settings page share it. */
+export const getWorkspaceSettingsRow = cache(
+  async (workspaceId: string): Promise<WorkspaceSettingsRow | null> => {
+    const supabase = await supabaseServer();
+    const { data } = await supabase
+      .from("workspace_settings")
+      .select(
+        "daily_budget_usd, monthly_budget_usd, per_run_item_cap, per_run_charge_cap_usd, raw_media_retention_days, providers_enabled",
+      )
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    return (data as WorkspaceSettingsRow | null) ?? null;
+  },
+);
+
 export interface BudgetSnapshot {
   settings: BudgetSettings;
   spentTodayUsd: number;
   spentMonthUsd: number;
+  runsThisMonth: number;
 }
 
 export async function getBudgetSnapshot(
@@ -18,13 +44,12 @@ export async function getBudgetSnapshot(
 ): Promise<BudgetSnapshot> {
   const supabase = await supabaseServer();
 
-  const { data: row } = await supabase
-    .from("workspace_settings")
-    .select(
-      "daily_budget_usd, monthly_budget_usd, per_run_item_cap, per_run_charge_cap_usd",
-    )
-    .eq("workspace_id", workspaceId)
-    .maybeSingle();
+  // Estimated cost is the enforcement basis; reported cost (when present)
+  // refines it. The sums run as a DB aggregate instead of a row scan here.
+  const [row, spendRes] = await Promise.all([
+    getWorkspaceSettingsRow(workspaceId),
+    supabase.rpc("workspace_spend", { ws: workspaceId }).maybeSingle(),
+  ]);
 
   const settings: BudgetSettings = row
     ? {
@@ -35,29 +60,18 @@ export async function getBudgetSnapshot(
       }
     : DEFAULT_BUDGET;
 
-  const now = new Date();
-  const dayStart = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  ).toISOString();
-  const monthStart = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-  ).toISOString();
+  const spend = spendRes.data as {
+    spent_today: number | string;
+    spent_month: number | string;
+    runs_month: number;
+  } | null;
 
-  // Estimated cost is the enforcement basis; reported cost (when present) refines display.
-  const { data: monthRows } = await supabase
-    .from("ai_runs")
-    .select("estimated_cost_usd, reported_cost_usd, created_at")
-    .eq("workspace_id", workspaceId)
-    .gte("created_at", monthStart);
-
-  let spentTodayUsd = 0;
-  let spentMonthUsd = 0;
-  for (const r of monthRows ?? []) {
-    const cost = Number(r.reported_cost_usd ?? r.estimated_cost_usd ?? 0);
-    spentMonthUsd += cost;
-    if (r.created_at >= dayStart) spentTodayUsd += cost;
-  }
-  return { settings, spentTodayUsd, spentMonthUsd };
+  return {
+    settings,
+    spentTodayUsd: Number(spend?.spent_today ?? 0),
+    spentMonthUsd: Number(spend?.spent_month ?? 0),
+    runsThisMonth: Number(spend?.runs_month ?? 0),
+  };
 }
 
 export async function checkBudget(

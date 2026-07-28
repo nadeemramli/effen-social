@@ -15,14 +15,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { restorePersonaVersion } from "./actions";
+import { getPersonaVersionContent, restorePersonaVersion } from "./actions";
 import type { PersonaContent } from "./schema";
 
 export interface VersionRow {
   id: string;
   version: number;
   createdAt: string;
-  content: PersonaContent;
 }
 
 interface VersionHistoryProps {
@@ -104,10 +103,28 @@ export function VersionHistory({
   versions,
 }: VersionHistoryProps) {
   const router = useRouter();
-  const [viewing, setViewing] = useState<VersionRow | null>(null);
+  const [viewing, setViewing] = useState<{
+    row: VersionRow;
+    content: PersonaContent;
+  } | null>(null);
+  const [loadingVersion, setLoadingVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState<VersionRow | null>(null);
   const [pending, setPending] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
+
+  // Version content isn't shipped with the page — load it when a version is opened.
+  async function openVersion(v: VersionRow) {
+    setLoadingVersion(v.version);
+    try {
+      const res = await getPersonaVersionContent(personaId, v.version);
+      if (res.ok && res.content) setViewing({ row: v, content: res.content });
+      else toast.error(res.error ?? "Could not load this version.");
+    } catch {
+      toast.error("Could not load this version.");
+    } finally {
+      setLoadingVersion(null);
+    }
+  }
 
   async function confirmRestore() {
     if (!restoring) return;
@@ -164,10 +181,12 @@ export function VersionHistory({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setViewing(v)}
+                onClick={() => openVersion(v)}
+                disabled={loadingVersion !== null}
+                aria-busy={loadingVersion === v.version}
                 aria-label={`View version ${v.version}`}
               >
-                View
+                {loadingVersion === v.version ? "Loading…" : "View"}
               </Button>
               {v.version !== currentVersion && (
                 <Button
@@ -194,12 +213,12 @@ export function VersionHistory({
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              Version {viewing?.version}
-              {viewing?.version === currentVersion ? " (current)" : ""}
+              Version {viewing?.row.version}
+              {viewing?.row.version === currentVersion ? " (current)" : ""}
             </DialogTitle>
             <DialogDescription>
-              Saved {viewing ? formatDate(viewing.createdAt) : ""}. Versions are
-              read-only.
+              Saved {viewing ? formatDate(viewing.row.createdAt) : ""}. Versions
+              are read-only.
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="max-h-[60vh] pr-3">

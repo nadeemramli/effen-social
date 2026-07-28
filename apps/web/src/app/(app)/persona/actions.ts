@@ -175,6 +175,23 @@ export async function savePersona(
   return { ok: true, personaId: persona.id, version: nextVersion };
 }
 
+export async function getPersonaVersionContent(
+  personaId: string,
+  version: number,
+): Promise<{ ok: boolean; content?: PersonaContent; error?: string }> {
+  const ws = await requireWorkspace();
+  const supabase = await supabaseServer();
+  const { data } = await supabase
+    .from("persona_versions")
+    .select("content")
+    .eq("persona_id", personaId)
+    .eq("workspace_id", ws.workspaceId)
+    .eq("version", version)
+    .maybeSingle();
+  if (!data) return { ok: false, error: `Version ${version} was not found.` };
+  return { ok: true, content: parsePersonaContent(data.content) };
+}
+
 export async function restorePersonaVersion(
   personaId: string,
   version: number,

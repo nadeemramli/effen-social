@@ -75,27 +75,29 @@ export default async function VideoPage({
   const original = assets?.find((a) => a.kind === "original");
   const poster = assets?.find((a) => a.kind === "poster");
   const playable = proxy ?? original;
-  const mediaUrl = playable
-    ? await storage().createSignedReadUrl(playable.storage_key, {
-        expiresInSeconds: 3600,
-      })
-    : null;
-  const posterUrl = poster
-    ? await storage().createSignedReadUrl(poster.storage_key, {
-        expiresInSeconds: 3600,
-      })
-    : null;
-  const frames = await Promise.all(
-    (assets ?? [])
-      .filter((a) => a.kind === "frame")
-      .slice(0, 8)
-      .map(async (a) => ({
-        url: await storage().createSignedReadUrl(a.storage_key, {
+  const [mediaUrl, posterUrl, frames] = await Promise.all([
+    playable
+      ? storage().createSignedReadUrl(playable.storage_key, {
           expiresInSeconds: 3600,
-        }),
-        timeSeconds: Number(a.frame_time_seconds ?? 0),
-      })),
-  );
+        })
+      : null,
+    poster
+      ? storage().createSignedReadUrl(poster.storage_key, {
+          expiresInSeconds: 3600,
+        })
+      : null,
+    Promise.all(
+      (assets ?? [])
+        .filter((a) => a.kind === "frame")
+        .slice(0, 8)
+        .map(async (a) => ({
+          url: await storage().createSignedReadUrl(a.storage_key, {
+            expiresInSeconds: 3600,
+          }),
+          timeSeconds: Number(a.frame_time_seconds ?? 0),
+        })),
+    ),
+  ]);
 
   const parsedAnalyses = (analyses ?? []).flatMap((a) => {
     const parsed = analysisV1Schema.safeParse(a.content);

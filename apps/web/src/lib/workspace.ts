@@ -17,15 +17,17 @@ export interface WorkspaceContext {
  */
 export const requireWorkspace = cache(async (): Promise<WorkspaceContext> => {
   const supabase = await supabaseServer();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  // Local JWT verification (ES256 + cached JWKS) — no auth-server round trip.
+  const { data } = await supabase.auth.getClaims();
+  const claims = data?.claims;
+  if (!claims) redirect("/login");
+  const userId = claims.sub;
+  const userEmail = (claims.email as string | undefined) ?? null;
 
   const { data: membership, error } = await supabase
     .from("workspace_members")
     .select("workspace_id, workspaces(name)")
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .limit(1)
     .maybeSingle();
 
@@ -36,8 +38,8 @@ export const requireWorkspace = cache(async (): Promise<WorkspaceContext> => {
 
   const ws = membership.workspaces as unknown as { name: string } | null;
   return {
-    userId: user.id,
-    userEmail: user.email ?? null,
+    userId,
+    userEmail,
     workspaceId: membership.workspace_id,
     workspaceName: ws?.name ?? "Workspace",
   };

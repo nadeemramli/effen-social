@@ -19,57 +19,23 @@ export default async function HooksPage() {
   const ws = await requireWorkspace();
   const supabase = await supabaseServer();
 
+  // The source analysis and its video come back embedded — one round trip
+  // instead of the hooks → analyses → videos chain.
   const { data } = await supabase
     .from("hooks")
     .select(
-      "id, mechanism, category, example, notes, source_analysis_id, created_at",
+      "id, mechanism, category, example, notes, source_analysis_id, created_at, analysis:analyses!source_analysis_id(id, video:videos(id, title))",
     )
     .eq("workspace_id", ws.workspaceId)
     .order("created_at", { ascending: false });
-  const rows = (data ?? []) as HookRow[];
-
-  // Resolve source analyses back to their videos so cards can link to /videos/[videoId].
-  const analysisIds = [
-    ...new Set(
-      rows.map((r) => r.source_analysis_id).filter((id): id is string => !!id),
-    ),
-  ];
-  const videoByAnalysis = new Map<
-    string,
-    { id: string; title: string | null }
-  >();
-  if (analysisIds.length > 0) {
-    const { data: analyses } = await supabase
-      .from("analyses")
-      .select("id, video_id")
-      .in("id", analysisIds);
-    const videoIds = [
-      ...new Set(
-        (analyses ?? [])
-          .map((a) => a.video_id as string | null)
-          .filter((id): id is string => !!id),
-      ),
-    ];
-    if (videoIds.length > 0) {
-      const { data: videos } = await supabase
-        .from("videos")
-        .select("id, title")
-        .eq("workspace_id", ws.workspaceId)
-        .in("id", videoIds);
-      const videoById = new Map(
-        (videos ?? []).map((v) => [
-          v.id as string,
-          { id: v.id as string, title: (v.title as string | null) ?? null },
-        ]),
-      );
-      for (const a of analyses ?? []) {
-        const video = a.video_id
-          ? videoById.get(a.video_id as string)
-          : undefined;
-        if (video) videoByAnalysis.set(a.id as string, video);
-      }
+  const rows = (data ?? []) as unknown as Array<
+    HookRow & {
+      analysis: {
+        id: string;
+        video: { id: string; title: string | null } | null;
+      } | null;
     }
-  }
+  >;
 
   const hooks: HookItem[] = rows.map((r) => ({
     id: r.id,
@@ -78,8 +44,8 @@ export default async function HooksPage() {
     example: r.example,
     notes: r.notes ?? "",
     createdAt: r.created_at,
-    sourceVideo: r.source_analysis_id
-      ? (videoByAnalysis.get(r.source_analysis_id) ?? null)
+    sourceVideo: r.analysis?.video
+      ? { id: r.analysis.video.id, title: r.analysis.video.title }
       : null,
   }));
 

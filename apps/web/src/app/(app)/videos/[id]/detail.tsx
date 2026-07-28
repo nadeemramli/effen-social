@@ -71,6 +71,20 @@ interface AnalysisRecord {
   content: AnalysisV1;
 }
 
+interface PipelineEventRow {
+  from_status: string | null;
+  to_status: string;
+  detail: string | null;
+  created_at: string;
+}
+
+interface StatusPayload {
+  status: PipelineStatus;
+  statusDetail: string | null;
+  lastError: string | null;
+  events: PipelineEventRow[];
+}
+
 const fmt = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
@@ -88,12 +102,7 @@ export function VideoDetail(props: {
   frames: Array<{ url: string; timeSeconds: number }>;
   analyses: AnalysisRecord[];
   notes: string;
-  events: Array<{
-    from_status: string | null;
-    to_status: string;
-    detail: string | null;
-    created_at: string;
-  }>;
+  events: PipelineEventRow[];
   snapshots: Array<{
     views: number | null;
     likes: number | null;
@@ -104,7 +113,6 @@ export function VideoDetail(props: {
   }>;
   ideas: Array<{ id: string; title: string; status: string }>;
 }) {
-  const { video } = props;
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [embedStart, setEmbedStart] = useState(0);
@@ -115,17 +123,51 @@ export function VideoDetail(props: {
   const [notesDirty, setNotesDirty] = useState(false);
   const [confirmRegen, setConfirmRegen] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [pollState, setPollState] = useState<StatusPayload | null>(null);
+
+  // Live status from the poll overlays the server-rendered snapshot.
+  const video = pollState
+    ? {
+        ...props.video,
+        status: pollState.status,
+        statusDetail: pollState.statusDetail,
+        lastError: pollState.lastError,
+      }
+    : props.video;
+  const events = pollState?.events ?? props.events;
 
   const active =
     (ACTIVE_STATUSES as readonly string[]).includes(video.status) ||
     video.status === "selected_for_analysis";
 
-  // Poll while the pipeline is working so progress stays live.
+  // Poll a lightweight status endpoint while the pipeline is working; on
+  // reaching a terminal state, refresh the route once to pull the full
+  // analysis payload.
   useEffect(() => {
     if (!active) return;
-    const t = setInterval(() => router.refresh(), 2500);
-    return () => clearInterval(t);
-  }, [active, router]);
+    let cancelled = false;
+    const t = setInterval(async () => {
+      try {
+        const res = await fetch(`/videos/${props.video.id}/status`, {
+          cache: "no-store",
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as StatusPayload;
+        if (cancelled) return;
+        setPollState(data);
+        const stillActive =
+          (ACTIVE_STATUSES as readonly string[]).includes(data.status) ||
+          data.status === "selected_for_analysis";
+        if (!stillActive) router.refresh();
+      } catch {
+        // Transient network failure — the next tick retries.
+      }
+    }, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [active, props.video.id, router]);
 
   const analysis =
     props.analyses.find((a) => a.version === selectedVersion) ??
@@ -152,6 +194,8 @@ export function VideoDetail(props: {
       else if (res.blocked)
         toast.error("Blocked by budget", { description: res.blocked });
       else toast.error(res.error ?? "Something went wrong.");
+      // Drop the poll overlay so the refreshed server snapshot wins.
+      setPollState(null);
       router.refresh();
     });
   }
@@ -787,7 +831,7 @@ export function VideoDetail(props: {
               <Card>
                 <CardContent className="pt-5">
                   <ol className="space-y-2 text-sm">
-                    {props.events.map((e, i) => (
+                    {events.map((e, i) => (
                       <li key={i} className="flex items-baseline gap-3">
                         <span className="timecode shrink-0">
                           {new Date(e.created_at).toLocaleTimeString()}
@@ -817,14 +861,14 @@ export function VideoDetail(props: {
         </div>
       )}
 
-      {!analysis && props.events.length > 0 && (
+      {!analysis && events.length > 0 && (
         <Card className="mt-6">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Activity</CardTitle>
           </CardHeader>
           <CardContent>
             <ol className="space-y-2 text-sm">
-              {props.events.map((e, i) => (
+              {events.map((e, i) => (
                 <li key={i} className="flex items-baseline gap-3">
                   <span className="timecode shrink-0">
                     {new Date(e.created_at).toLocaleTimeString()}
